@@ -7,6 +7,7 @@
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
+#include <linux/version.h>
 
 #include <asm/uaccess.h>
 
@@ -105,7 +106,7 @@ static ssize_t vinput_read(struct file *file, char __user *buffer, size_t count,
         count = len - *offset;
 
     if (raw_copy_to_user(buffer, buff + *offset, count))
-        count = -EFAULT;
+        return -EFAULT;
 
     *offset += count;
 
@@ -132,7 +133,9 @@ static ssize_t vinput_write(struct file *file, const char __user *buffer,
 }
 
 static const struct file_operations vinput_fops = {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 4, 0)
     .owner = THIS_MODULE,
+#endif
     .open = vinput_open,
     .release = vinput_release,
     .read = vinput_read,
@@ -174,9 +177,12 @@ static struct vinput *vinput_alloc_vdevice(void)
     int err;
     struct vinput *vinput = kzalloc(sizeof(struct vinput), GFP_KERNEL);
 
-    try_module_get(THIS_MODULE);
+    if (!vinput) {
+        pr_err("vinput: Cannot allocate vinput input device\n");
+        return ERR_PTR(-ENOMEM);
+    }
 
-    memset(vinput, 0, sizeof(struct vinput));
+    try_module_get(THIS_MODULE);
 
     spin_lock_init(&vinput->lock);
 
@@ -240,7 +246,12 @@ static int vinput_register_vdevice(struct vinput *vinput)
     return err;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+static ssize_t export_store(const struct class *class,
+                            const struct class_attribute *attr,
+#else
 static ssize_t export_store(struct class *class, struct class_attribute *attr,
+#endif
                             const char *buf, size_t len)
 {
     int err;
@@ -281,7 +292,12 @@ fail:
 /* This macro generates class_attr_export structure and export_store() */
 static CLASS_ATTR_WO(export);
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+static ssize_t unexport_store(const struct class *class,
+                              const struct class_attribute *attr,
+#else
 static ssize_t unexport_store(struct class *class, struct class_attribute *attr,
+#endif
                               const char *buf, size_t len)
 {
     int err;
@@ -322,7 +338,9 @@ ATTRIBUTE_GROUPS(vinput_class);
 
 static struct class vinput_class = {
     .name = "vinput",
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 4, 0)
     .owner = THIS_MODULE,
+#endif
     .class_groups = vinput_class_groups,
 };
 

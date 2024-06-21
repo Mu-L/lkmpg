@@ -708,7 +708,7 @@ Now you can turn back to the directory of your module and compile it: It will be
 \section{Preliminaries}
 \subsection{How modules begin and end}
 \label{sec:module_init_exit}
-A typical program starts with a |main()| function, executes a series of instructions,
+A typical program starts with a \cpp|main()| function, executes a series of instructions,
 and terminates after completing these instructions.
 Kernel modules, however, follow a different pattern.
 A module always begins with either the \cpp|init_module| function or a function designated by the \cpp|module_init| call.
@@ -716,7 +716,7 @@ This function acts as the module's entry point,
 informing the kernel of the module's functionalities and preparing the kernel to utilize the module's functions when necessary.
 After performing these tasks, the entry function returns, and the module remains inactive until the kernel requires its code.
 
-All modules conclude by invoking either \cpp|cleanup_module| or a function specified through the \cpp|module_exit |call.
+All modules conclude by invoking either \cpp|cleanup_module| or a function specified through the \cpp|module_exit| call.
 This serves as the module's exit function, reversing the actions of the entry function by unregistering the previously registered functionalities.
 
 It is mandatory for every module to have both an entry and an exit function.
@@ -729,7 +729,7 @@ which are understood to mean the same.
 Programmers use functions they do not define all the time.
 A prime example of this is \cpp|printf()|.
 You use these library functions which are provided by the standard C library, libc.
-The definitions for these functions do not actually enter your program until the linking stage, which insures that the code (for \cpp|printf()| for example) is available, and fixes the call instruction to point to that code.
+The definitions for these functions do not actually enter your program until the linking stage, which ensures that the code (for \cpp|printf()| for example) is available, and fixes the call instruction to point to that code.
 
 Kernel modules are different here, too. In the hello world example, you might have noticed that we used a function, \cpp|pr_info()| but did not include a standard I/O library.
 That is because modules are object files whose symbols get resolved upon running \sh|insmod| or \sh|modprobe|.
@@ -1052,7 +1052,7 @@ int alloc_chrdev_region(dev_t *dev, unsigned baseminor, unsigned count, const ch
 \end{code}
 
 The choice between two different functions depends on whether you know the major numbers for your device.
-Using \cpp|register_chrdev_region| if you know the device major number and \cpp|alloc_chrdev_region| if you would like to allocate a dynamicly-allocated major number.
+Using \cpp|register_chrdev_region| if you know the device major number and \cpp|alloc_chrdev_region| if you would like to allocate a dynamically-allocated major number.
 
 Second, we should initialize the data structure \cpp|struct cdev| for our char device and associate it with the device numbers.
 To initialize the \cpp|struct cdev|, we can achieve by the similar sequence of the following codes.
@@ -1689,6 +1689,21 @@ The example here is \verb|"irq safe"| in that if interrupts happen during the lo
 
 \samplec{examples/example_spinlock.c}
 
+Taking 100\% of a CPU's resources comes with greater responsibility.
+Situations where the kernel code monopolizes a CPU are called \textbf{atomic contexts}.
+Holding a spinlock is one of those situations.
+Sleeping in atomic contexts may leave the system hanging, as the occupied CPU devotes 100\% of its resources doing nothing but sleeping.
+In some worse cases the system may crash.
+Thus, sleeping in atomic contexts is considered a bug in the kernel.
+They are sometimes called ``sleep-in-atomic-context'' in some materials.
+
+Note that sleeping here is not limited to calling the sleep functions explicitly.
+If subsequent function calls eventually invoke a function that sleeps, it is also considered sleeping.
+Thus, it is important to pay attention to functions being used in atomic context.
+There's no documentation recording all such functions, but code comments may help.
+Sometimes you may find comments in kernel source code stating that a function ``may sleep'', ``might sleep'', or more explicitly ``the caller should not hold a spinlock''.
+Those comments are hints that a function may implicitly sleep and must not be called in atomic contexts.
+
 \subsection{Read and write locks}
 \label{sec:rwlock}
 Read and write locks are specialised kinds of spinlocks so that you can exclusively read from something or write to something.
@@ -1803,6 +1818,10 @@ There are two main ways of running tasks: tasklets and work queues.
 Tasklets are a quick and easy way of scheduling a single function to be run.
 For example, when triggered from an interrupt, whereas work queues are more complicated but also better suited to running multiple things in a sequence.
 
+It is possible that in future tasklets may be replaced by \textit{threaded irqs}.
+However, discussion about that has been ongoing since 2007 (\href{https://lwn.net/Articles/239633}{Eliminating tasklets}), so do not hold your breath.
+See the section \ref{sec:irq} if you wish to avoid the tasklet debate.
+
 \subsection{Tasklets}
 \label{sec:tasklet}
 Here is an example tasklet module.
@@ -1910,42 +1929,39 @@ The example below modifies the previous example to also run an additional task w
 
 \samplec{examples/bottomhalf.c}
 
-\section{Crypto}
-\label{sec:crypto}
-At the dawn of the internet, everybody trusted everybody completely\ldots{}but that did not work out so well.
-When this guide was originally written, it was a more innocent era in which almost nobody actually gave a damn about crypto - least of all kernel developers.
-That is certainly no longer the case now.
-To handle crypto stuff, the kernel has its own API enabling common methods of encryption, decryption and your favourite hash functions.
+\subsection{Threaded IRQ}
 
-\subsection{Hash functions}
-\label{sec:hashfunc}
+Threaded IRQ is a mechanism to organize both top-half and bottom-half of an IRQ at once.
+A threaded IRQ splits the one handler in \cpp|request_irq()| into two: one for the top-half, the other for the bottom-half.
+The \cpp|request_threaded_irq()| is the function for using threaded IRQs.
+Two handlers are registered at once in the \cpp|request_threaded_irq()|.
 
-Calculating and checking the hashes of things is a common operation.
-Here is a demonstration of how to calculate a sha256 hash within a kernel module.
-To provide the sha256 algorithm support, make sure \cpp|CONFIG_CRYPTO_SHA256| is enabled in kernel.
+Those two handlers run in different context.
+The top-half handler runs in interrupt context.
+It's the equivalence of the handler passed to the \cpp|request_irq()|.
+The bottom-half handler on the other hand runs in its own thread.
+This thread is created on registration of a threaded IRQ.
+Its sole purpose is to run this bottom-half handler.
+This is where a threaded IRQ is ``threaded''.
+If \cpp|IRQ_WAKE_THREAD| is returned by the top-half handler, that bottom-half serving thread will wake up.
+The thread then runs the bottom-half handler.
 
-\samplec{examples/cryptosha256.c}
+Here is an example of how to do the same thing as before, with top and bottom halves, but using threads.
 
-Install the module:
+\samplec{examples/bh_threaded.c}
 
-\begin{codebash}
-sudo insmod cryptosha256.ko
-sudo dmesg
-\end{codebash}
+A threaded IRQ is registered using \cpp|request_threaded_irq()|.
+This function only takes one additional parameter than the \cpp|request_irq()| -- the bottom-half handling function that runs in its own thread.
+In this example it is the \cpp|button_bottom_half()|.
+Usage of other parameters are the same as \cpp|request_irq()|.
 
-And you should see that the hash was calculated for the test string.
+Presence of both handlers is not mandatory.
+If either of them is not needed, pass the \cpp|NULL| instead.
+A \cpp|NULL| top-half handler implies that no action is taken except to wake up the bottom-half serving thread, which runs the bottom-half handler.
+Similarly, a \cpp|NULL| bottom-half handler effectively acts as if \cpp|request_irq()| were used.
+In fact, this is how \cpp|request_irq()| is implemented.
 
-Finally, remove the test module:
-
-\begin{codebash}
-sudo rmmod cryptosha256
-\end{codebash}
-
-\subsection{Symmetric key encryption}
-\label{sec:org2fab20b}
-Here is an example of symmetrically encrypting a string using the AES algorithm and a password.
-
-\samplec{examples/cryptosk.c}
+Note that passing \cpp|NULL| to both handlers is considered an error and will make registration fail.
 
 \section{Virtual Input Device Driver}
 \label{sec:vinput}
