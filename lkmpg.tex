@@ -210,7 +210,7 @@ apt-cache search linux-headers-`uname -r`
 The following command provides information on the available kernel header files.
 Then for example:
 \begin{codebash}
-sudo apt-get install kmod linux-headers-5.4.0-80-generic
+sudo apt-get install linux-headers-`uname -r`
 \end{codebash}
 
 On Arch Linux:
@@ -769,7 +769,7 @@ The 2nd man section is devoted to system calls (like \cpp|kill()| and \cpp|read(
 The 3rd man section is devoted to library calls, which you would probably be more familiar with (like \cpp|cosh()| and \cpp|random()|).
 
 You can even write modules to replace the kernel's system calls, which we will do shortly.
-Crackers often make use of this sort of thing for backdoors or trojans, but you can write your own modules to do more benign things, like have the kernel write Tee hee, that tickles! every time someone tries to delete a file on your system.
+Crackers often make use of this sort of thing for backdoors or trojans, but you can write your own modules to do more benign things, like have the kernel log a message whenever someone attempts to delete a file on your system.
 
 \subsection{User Space vs Kernel Space}
 \label{sec:user_kernl_space}
@@ -1230,7 +1230,7 @@ Consider using this mechanism, in case you want to document something kernel rel
 As we have seen, writing a \verb|/proc| file may be quite ``complex''.
 So to help people writing \verb|/proc| file, there is an API named \cpp|seq_file| that helps formatting a \verb|/proc| file for output.
 It is based on sequence, which is composed of 3 functions: \cpp|start()|, \cpp|next()|, and \cpp|stop()|.
-The \cpp|seq_file| API starts a sequence when a user read the \verb|/proc| file.
+The \cpp|seq_file| API starts a sequence when a user reads the \verb|/proc| file.
 
 A sequence begins with the call of the function \cpp|start()|.
 If the return is a non \cpp|NULL| value, the function \cpp|next()| is called; otherwise, the \cpp|stop()| function is called directly.
@@ -1279,7 +1279,7 @@ If you want more information, you can read this web page:
   \item \url{https://kernelnewbies.org/Documents/SeqFileHowTo}
 \end{itemize}
 
-You can also read the code of \src{fs/seq\_file.c} in the linux kernel.
+You can also read the code of \src{fs/seq\_file.c} in the Linux kernel.
 
 \section{sysfs: Interacting with your module}
 \label{sec:sysfs}
@@ -1414,6 +1414,10 @@ So far, the only thing we've done was to use well defined kernel mechanisms to r
 This is fine if you want to do something the kernel programmers thought you'd want, such as write a device driver.
 But what if you want to do something unusual, to change the behavior of the system in some way?
 Then, you are mostly on your own.
+
+Notice that this example has been unavailable since Linux v6.9.
+Specifically after this \href{https://github.com/torvalds/linux/commit/1e3ad78334a69b36e107232e337f9d693dcc9df2#diff-4a16bf89a09b4f49669a30d54540f0b936ea0224dc6ee9edfa7700deb16c3e11R52}{commit}, due to the system call table changing the implementation from an indirect function call table to a switch statement for security issue, such as Branch History Injection (BHI) attack.
+See more information \href{https://bugs.launchpad.net/ubuntu/+source/linux/+bug/2060909}{here}.
 
 Should one choose not to use a virtual machine, kernel programming can become risky.
 For example, while writing the code below, the \cpp|open()| system call was inadvertently disrupted.
@@ -1612,7 +1616,8 @@ The process does not know somebody else used the CPU for most of the time betwee
 It can then proceed to set a global variable to tell all the other processes that the file is still open and go on with its life.
 When the other processes get a piece of the CPU, they'll see that global variable and go back to sleep.
 
-So we will use \sh|tail -f| to keep the file open in the background, while trying to access it with another process (again in the background, so that we need not switch to a different vt).
+So we will use \sh|tail -f| to keep the file open in the background, and attempt to access it with another background process.
+This way, we don't need to switch to another terminal window or virtual terminal to run the second process.
 As soon as the first background process is killed with kill \%1 , the second is woken up, is able to access the file and finally terminates.
 
 To make our life more interesting, \cpp|module_close| does not have a monopoly on waking up the processes which wait to access the file.
@@ -1671,7 +1676,7 @@ There are other variations of the \cpp|wait_for_completion| function, which incl
 
 \samplec{examples/completions.c}
 
-\section{Avoiding Collisions and Deadlocks}
+\section{Synchronization}
 \label{sec:synchronization}
 If processes running on different CPUs or in different threads try to access the same memory, then it is possible that strange things can happen or your system can lock up.
 To avoid this, various types of mutual exclusion kernel functions are available.
@@ -1681,7 +1686,40 @@ These indicate if a section of code is "locked" or "unlocked" so that simultaneo
 You can use kernel mutexes (mutual exclusions) in much the same manner that you might deploy them in userland.
 This may be all that is needed to avoid collisions in most cases.
 
+Mutexes in the Linux kernel enforce strict ownership: only the task that successfully acquired the mutex can release (or unlock) it.
+Attempting to release a mutex held by another task or releasing an unheld mutex multiple times by the same task typically leads to errors or undefined behavior.
+If a task tries to lock a mutex it already holds, it may be blocked or sleep, where the task waits for itself to release the lock.
+
+Before use, a mutex must be initialized through specific APIs (such as \cpp|mutex_init| or by using the \cpp|DEFINE_MUTEX| macro for compile-time initialization).
+And it is prohibited to directly modify the internal structure of a mutex using a memory manipulation function like \cpp|memset|.
+
 \samplec{examples/example_mutex.c}
+
+The various suffixes appended to mutex functions in the Linux kernel primarily dictate how a task waiting to acquire a lock will behave,
+particularly concerning its interruptibility.
+
+When a task calls \cpp|mutex_lock()|, and if the mutex is currently unavailable,
+the task enters a sleep state until it can successfully obtain the lock.
+During this period, the task cannot be interrupted.
+In contrast, functions with the \cpp|_interruptible| suffix, such as \cpp|mutex_lock_interruptible()|,
+behave similarly to \cpp|mutex_lock()| but allow the waiting process to be interrupted by signals.
+If a task receives a signal (like a termination signal) while waiting for the lock,
+it will exit the waiting state and return an error code (\cpp|-EINTR|).
+This is useful for applications that need to handle external events even while waiting for a lock.
+
+Beyond these fundamental locking behaviors, other mutex functions offer specialized capabilities.
+Functions like \cpp|mutex_lock_nested| and \cpp|mutex_lock_interruptible_nested()| incorporate the \cpp|__nested()| functionality,
+providing support for nested locking.
+This prior locking mechanism aids in managing lock acquisition and preventing deadlocks,
+often employing a subclass parameter for more precise deadlock detection.
+The latter variant combines nested locking with the ability for the waiting process to be interrupted by signals.
+Another function is \cpp|mutex_trylock()|, which attempts to acquire the mutex without blocking.
+It returns 1 if the lock is successfully acquired and 0 if the mutex is already held by another task.
+
+Despite the fact that \cpp|mutex_trylock| does not sleep,
+it is still generally not safe for use in interrupt context because its implementation isn't atomic.
+If an interrupt occurs between checking the lock's availability and its acquisition,
+this can lead to race conditions and potential data corruption.
 
 \subsection{Spinlocks}
 \label{sec:spinlock}
@@ -1895,21 +1933,59 @@ Finally, remove the module:
 sudo rmmod led
 \end{codebash}
 
+\subsection{DHT11 sensor}
+\label{sec:gpio_dht11}
+The DHT11 sensor is a well-known entry-level sensor commonly used to measure humidity and temperature.
+In this subsection, we will use GPIO to communicate through a single data line.
+The DHT11 communication protocol can be referred to in the \href{https://www.mouser.com/datasheet/2/758/DHT11-Technical-Data-Sheet-Translated-Version-1143054.pdf?srsltid=AfmBOoppls-QTd864640bVtbK90sWBsFzJ_7SgjOD2EpwuLLGUSTyYnv}{datasheet}.
+
+In the implementation, the data pin of the DHT11 sensor is connected to GPIO4 on the Raspberry Pi.
+The sensor's VCC and GND pins are connected to 3.3V and GND, respectively.
+For more details about the Raspberry Pi pin assignments, refer to \href{https://pinout.xyz/}{Raspberry Pi Pinout}.
+The materials used include a Raspberry Pi 5, a DHT11 sensor, and jumper wires.
+
+\samplec{examples/dht11.c}
+Make and install the module:
+\begin{codebash}
+make
+sudo insmod dht11.ko
+\end{codebash}
+
+Check the Output of the DHT11 Sensor:
+\begin{codebash}
+sudo cat /dev/dht11 
+\end{codebash}
+
+Expected Output:
+\begin{verbatim}
+$ sudo cat /dev/dht11 
+Humidity: 61%
+Temperature: 30°C
+\end{verbatim}
+
+Finally, remove the module:
+\begin{codebash}
+sudo rmmod dht11
+\end{codebash}
+
 \section{Scheduling Tasks}
 \label{sec:scheduling_tasks}
 There are two main ways of running tasks: tasklets and work queues.
 Tasklets are a quick and easy way of scheduling a single function to be run.
-For example, when triggered from an interrupt, whereas work queues are more complicated but also better suited to running multiple things in a sequence.
+For example, when triggered from an interrupt,
+whereas work queues are more complicated but also better suited to running multiple things in a sequence.
 
-It is possible that in future tasklets may be replaced by \textit{threaded irqs}.
-However, discussion about that has been ongoing since 2007 (\href{https://lwn.net/Articles/239633}{Eliminating tasklets}), so do not hold your breath.
-See the section \ref{sec:irq} if you wish to avoid the tasklet debate.
+It is possible that in future tasklets may be replaced by \textit{threaded IRQs}.
+However, discussion about that has been ongoing since 2007 (\href{https://lwn.net/Articles/239633}{Eliminating tasklets} and \href{https://lwn.net/Articles/960041/}{The end of tasklets}),
+so expecting immediate changes would be unwise.
+See the section \ref{sec:irq} for alternatives that avoid the tasklet debate.
 
 \subsection{Tasklets}
 \label{sec:tasklet}
 Here is an example tasklet module.
 The \cpp|tasklet_fn| function runs for a few seconds.
-In the meantime, execution of the \cpp|example_tasklet_init| function may continue to the exit point, depending on whether it is interrupted by \textbf{softirq}.
+In the meantime, execution of the \cpp|example_tasklet_init| function may continue to the exit point,
+depending on whether it is interrupted by \textbf{softirq}.
 
 \samplec{examples/example_tasklet.c}
 
@@ -1921,7 +1997,7 @@ Example tasklet starts
 Example tasklet init continues...
 Example tasklet ends
 \end{verbatim}
-Although tasklet is easy to use, it comes with several drawbacks, and developers are discussing about getting rid of tasklet in linux kernel.
+Although tasklet is easy to use, it comes with several drawbacks, and developers have been discussing their removal from the Linux kernel.
 The tasklet callback runs in atomic context, inside a software interrupt, meaning that it cannot sleep or access user-space data, so not all work can be done in a tasklet handler.
 Also, the kernel only allows one instance of any given tasklet to be running at any given time; multiple different tasklet callbacks can run in parallel.
 
@@ -1951,8 +2027,8 @@ The first type is when the CPU gives orders to the hardware, the other is when t
 The second, called interrupts, is much harder to implement because it has to be dealt with when convenient for the hardware, not the CPU.
 Hardware devices typically have a very small amount of RAM, and if you do not read their information when available, it is lost.
 
-Under Linux, hardware interrupts are called IRQ's (Interrupt ReQuests).
-There are two types of IRQ's, short and long.
+Under Linux, hardware interrupts are called IRQs (Interrupt ReQuests).
+There are two types of IRQs, short and long.
 A short IRQ is one which is expected to take a very short period of time, during which the rest of the machine will be blocked and no other interrupts will be handled.
 A long IRQ is one which can take longer, and during which other interrupts may occur (but not interrupts from the same device).
 If at all possible, it is better to declare an interrupt handler to be long.
@@ -2013,7 +2089,7 @@ The example below modifies the previous example to also run an additional task w
 \samplec{examples/bottomhalf.c}
 
 \subsection{Threaded IRQ}
-
+\label{sec:threaded_irq}
 Threaded IRQ is a mechanism to organize both top-half and bottom-half of an IRQ at once.
 A threaded IRQ splits the one handler in \cpp|request_irq()| into two: one for the top-half, the other for the bottom-half.
 The \cpp|request_threaded_irq()| is the function for using threaded IRQs.
@@ -2055,7 +2131,7 @@ After that, registers it by calling \cpp|input_register_device()|.
 
 Here is an example, vinput,
 It is an API to allow easy development of virtual input drivers.
-The drivers needs to export a \cpp|vinput_device()| that contains the virtual device name and \cpp|vinput_ops| structure that describes:
+The driver needs to export a \cpp|vinput_device()| that contains the virtual device name and \cpp|vinput_ops| structure that describes:
 
 \begin{itemize}
     \item the init function: \cpp|init()|
